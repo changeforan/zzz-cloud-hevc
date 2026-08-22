@@ -100,11 +100,17 @@ Then run `install-proton-hevc.sh`, restart Steam, select **Proton 11.0 (HEVC)**
 and set launch options:
 
 ```
-PROTON_USE_WINED3D=1 WINE_D3D_CONFIG=renderer=vulkan %command%
+PROTON_USE_WINED3D=1 WINE_D3D_CONFIG=renderer=vulkan WINEDLLOVERRIDES=dxgi=b %command%
 ```
 
-Both are needed. `PROTON_USE_WINED3D=1` on its own leaves wined3d on the **OpenGL**
-renderer, where no decoder exists.
+All three matter:
+
+* `PROTON_USE_WINED3D=1` selects wined3d over DXVK. On its own it leaves wined3d on
+  the **OpenGL** renderer, where no decoder exists.
+* `WINE_D3D_CONFIG=renderer=vulkan` switches it to the Vulkan renderer, where the
+  decoder lives.
+* `WINEDLLOVERRIDES=dxgi=b` forces Wine's **builtin** dxgi. Without it the app dies
+  in Steam's Gaming Mode — see below.
 
 Pin the wine revision to the one your Proton actually ships:
 
@@ -113,7 +119,7 @@ gh api repos/ValveSoftware/Proton/contents/wine?ref=proton-11.0-2 --jq .sha
 # -> dc26e61847081a1b5cb0733dc30feba6ee575482
 ```
 
-### Five things that will bite you
+### Six things that will bite you
 
 1. **The Vulkan extension gate is in the PE half of winevulkan.** `loader.c`
    filters the driver's extension list through `is_device_extension_supported()`
@@ -139,6 +145,21 @@ gh api repos/ValveSoftware/Proton/contents/wine?ref=proton-11.0-2 --jq .sha
 5. **Proton stages the D3D DLLs from `files/share/default_pfx/`**, not from
    `files/lib/wine/`. A prefix left untouched after a launch attempt means startup
    died before staging.
+6. **Steam's Gaming Mode injects `WINEDLLOVERRIDES=dxgi=n`** (native-only dxgi).
+   There is no native `dxgi.dll` in the prefix, so Wine's builtin is refused, the
+   `d3d11.dll -> dxgi.dll` import cannot resolve, and the application dies during
+   module loading — before `main`, so it writes no log of its own:
+   ```
+   err:module:import_dll  dxgi.dll (needed by "C:\windows\system32\d3d11.dll") not found
+   err:module:loader_init Importing dlls for "App.exe" failed, status c0000135
+   ```
+   Symptom: works in Desktop Mode, dies after ~3 seconds in Gaming Mode. **Fix:
+   `WINEDLLOVERRIDES=dxgi=b` in the launch options.** This affects *any*
+   `PROTON_USE_WINED3D=1` title, not just video-decode ones — wined3d needs the
+   builtin dxgi, and that override demands a native one. The variable comes from
+   the Gaming Mode session itself; it is not in `shortcuts.vdf`, `config.vdf`, or
+   `user_settings.py`. Note `PROTON_LOG=1` is what makes this diagnosable: the
+   header prints `System WINEDLLOVERRIDES` before anything else happens.
 
 Wine's git tree also needs `tools/make_specfiles`, `tools/make_requests` and
 `autoreconf -f -i` before `configure` — none of that generated output is committed.

@@ -123,4 +123,9 @@ echo
 echo "Done.  Restart Steam, then set the game's compatibility tool to"
 echo "'Proton 11.0 (HEVC)' and add these launch options:"
 echo
-echo "    PROTON_USE_WINED3D=1 WINE_D3D_CONFIG=renderer=vulkan %command%"
+echo "    PROTON_USE_WINED3D=1 WINE_D3D_CONFIG=renderer=vulkan WINEDLLOVERRIDES=dxgi=b %command%"
+echo
+echo "dxgi=b is required: Steam's Gaming Mode injects WINEDLLOVERRIDES=dxgi=n,"
+echo "which refuses Wine's builtin dxgi and kills the app during module load"
+echo "(status c0000135) - Desktop Mode is unaffected, so it looks like a"
+echo "Gaming-Mode-only crash a few seconds after launch."
