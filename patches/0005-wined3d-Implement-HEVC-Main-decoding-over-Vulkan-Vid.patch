@@ -1,0 +1,764 @@
+From 3a04468271ee976cde5c02324513aa5bb2fd7b8a Mon Sep 17 00:00:00 2001
+From: changeforan <7800290+changeforan@users.noreply.github.com>
+Date: Sat, 22 Aug 2026 19:20:39 +0800
+Subject: [PATCH 5/5] wined3d: Implement HEVC Main decoding over Vulkan Video.
+
+Translate DXVA_PicParams_HEVC into the StdVideoH265 video, sequence and
+picture parameter sets, and submit slices through vkCmdDecodeVideoKHR.
+
+Note that DXVA's RefPicSetStCurrBefore/After/LtCurr arrays hold indices
+into RefPicList, whereas Vulkan expects DPB slot indices, so they are
+remapped while walking the reference list.
+
+The quantisation matrix buffer is sized per codec: DXVA_Qmatrix_HEVC is
+1000 bytes against 224 for H.264, as HEVC adds the 16x16 and 32x32
+scaling lists.
+---
+ dlls/d3d11/decoder.c      |  10 +
+ dlls/wined3d/adapter_vk.c |   2 +
+ dlls/wined3d/decoder.c    | 594 ++++++++++++++++++++++++++++++++++++--
+ dlls/wined3d/wined3d_vk.h |   1 +
+ 4 files changed, 582 insertions(+), 25 deletions(-)
+
+diff --git a/dlls/d3d11/decoder.c b/dlls/d3d11/decoder.c
+index b3a19821..ad7adbd7 100644
+--- a/dlls/d3d11/decoder.c
++++ b/dlls/d3d11/decoder.c
+@@ -196,6 +196,16 @@ HRESULT d3d_video_decoder_create(struct d3d_device *device, const D3D11_VIDEO_DE
+             return E_NOTIMPL;
+         }
+     }
++    else if (IsEqualGUID(&wined3d_desc.codec, &DXVA_ModeHEVC_VLD_Main))
++    {
++        /* The DXVA HEVC specification only defines the short slice control
++         * structure, signalled by ConfigBitstreamRaw == 1. */
++        if (config->ConfigBitstreamRaw != 1)
++        {
++            FIXME("Unsupported HEVC ConfigBitstreamRaw value %u.\n", config->ConfigBitstreamRaw);
++            return E_NOTIMPL;
++        }
++    }
+ 
+     if (FAILED(hr = wined3d_decoder_create(device->wined3d_device, &wined3d_desc, &object->wined3d_decoder)))
+     {
+diff --git a/dlls/wined3d/adapter_vk.c b/dlls/wined3d/adapter_vk.c
+index 86f7971f..e92ec94d 100644
+--- a/dlls/wined3d/adapter_vk.c
++++ b/dlls/wined3d/adapter_vk.c
+@@ -2420,6 +2420,7 @@ static bool wined3d_adapter_vk_init_device_extensions(struct wined3d_adapter_vk
+         /* KHR_synchronization2 is required for KHR_video_queue. */
+         {VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,           ~0u},
+         {VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,           ~0u},
++        {VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME,           ~0u},
+         {VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME,          ~0u},
+         {VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,                 ~0u},
+     };
+@@ -2444,6 +2445,7 @@ static bool wined3d_adapter_vk_init_device_extensions(struct wined3d_adapter_vk
+         {VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,     WINED3D_VK_KHR_SAMPLER_YCBCR_CONVERSION},
+         {VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME,       WINED3D_VK_KHR_SHADER_DRAW_PARAMETERS},
+         {VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,            WINED3D_VK_KHR_VIDEO_DECODE_H264},
++        {VK_KHR_VIDEO_DECODE_H265_EXTENSION_NAME,            WINED3D_VK_KHR_VIDEO_DECODE_H265},
+         {VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,                  WINED3D_VK_KHR_VIDEO_QUEUE},
+     };
+ 
+diff --git a/dlls/wined3d/decoder.c b/dlls/wined3d/decoder.c
+index b56468dc..58530377 100644
+--- a/dlls/wined3d/decoder.c
++++ b/dlls/wined3d/decoder.c
+@@ -79,6 +79,7 @@ static bool is_supported_codec(struct wined3d_adapter *adapter, const GUID *code
+ static HRESULT wined3d_decoder_init(struct wined3d_decoder *decoder,
+         struct wined3d_device *device, const struct wined3d_decoder_desc *desc)
+ {
++    unsigned int params_size, matrix_size;
+     HRESULT hr;
+ 
+     struct wined3d_buffer_desc buffer_desc =
+@@ -91,12 +92,26 @@ static HRESULT wined3d_decoder_init(struct wined3d_decoder *decoder,
+     decoder->desc = *desc;
+     wined3d_lock_init(&decoder->feedback_cs, "wined3d_decoder.feedback_cs");
+ 
+-    buffer_desc.byte_width = sizeof(DXVA_PicParams_H264);
++    /* These buffers are codec-specific. Note in particular that the HEVC
++     * quantisation matrix is much larger than the H.264 one (1000 vs 224
++     * bytes), since HEVC has 16x16 and 32x32 scaling lists as well. */
++    if (IsEqualGUID(&desc->codec, &DXVA_ModeHEVC_VLD_Main))
++    {
++        params_size = sizeof(DXVA_PicParams_HEVC);
++        matrix_size = sizeof(DXVA_Qmatrix_HEVC);
++    }
++    else
++    {
++        params_size = sizeof(DXVA_PicParams_H264);
++        matrix_size = sizeof(DXVA_Qmatrix_H264);
++    }
++
++    buffer_desc.byte_width = params_size;
+     if (FAILED(hr = wined3d_buffer_create(device, &buffer_desc,
+             NULL, NULL, &wined3d_null_parent_ops, &decoder->parameters)))
+         return hr;
+ 
+-    buffer_desc.byte_width = sizeof(DXVA_Qmatrix_H264);
++    buffer_desc.byte_width = matrix_size;
+     if (FAILED(hr = wined3d_buffer_create(device, &buffer_desc,
+             NULL, NULL, &wined3d_null_parent_ops, &decoder->matrix)))
+     {
+@@ -230,6 +245,20 @@ static void fill_vk_profile_info(VkVideoProfileInfoKHR *profile, const GUID *cod
+         profile->pNext = &h264_profile;
+         profile->videoCodecOperation = VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR;
+     }
++    else if (IsEqualGUID(codec, &DXVA_ModeHEVC_VLD_Main))
++    {
++        static const VkVideoDecodeH265ProfileInfoKHR h265_profile =
++        {
++            .sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_PROFILE_INFO_KHR,
++            /* As with H.264, DXVA does not convey the profile out of band; the
++             * HEVC DXVA specification ties each decode GUID to a fixed profile,
++             * so DXVA_ModeHEVC_VLD_Main always means the Main profile. */
++            .stdProfileIdc = STD_VIDEO_H265_PROFILE_IDC_MAIN,
++        };
++
++        profile->pNext = &h265_profile;
++        profile->videoCodecOperation = VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
++    }
+     else
+     {
+         FIXME("Unhandled codec %s.\n", debugstr_guid(codec));
+@@ -263,6 +292,33 @@ static bool wined3d_decoder_vk_is_h264_decode_supported(const struct wined3d_ada
+     return true;
+ }
+ 
++static bool wined3d_decoder_vk_is_h265_decode_supported(const struct wined3d_adapter_vk *adapter_vk)
++{
++    VkVideoDecodeH265CapabilitiesKHR h265_caps = {.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_CAPABILITIES_KHR};
++    VkVideoDecodeCapabilitiesKHR decode_caps = {.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_CAPABILITIES_KHR};
++    VkVideoProfileInfoKHR profile = {.sType = VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR};
++    VkVideoCapabilitiesKHR caps = {.sType = VK_STRUCTURE_TYPE_VIDEO_CAPABILITIES_KHR};
++    const struct wined3d_vk_info *vk_info = &adapter_vk->vk_info;
++    VkResult vr;
++
++    if (!vk_info->supported[WINED3D_VK_KHR_VIDEO_DECODE_H265])
++        return false;
++
++    /* Only NV12 is required to be supported. */
++    fill_vk_profile_info(&profile, &DXVA_ModeHEVC_VLD_Main, WINED3DFMT_NV12_PLANAR);
++
++    caps.pNext = &decode_caps;
++    decode_caps.pNext = &h265_caps;
++    if ((vr = VK_CALL(vkGetPhysicalDeviceVideoCapabilitiesKHR(
++            adapter_vk->physical_device, &profile, &caps))) != VK_SUCCESS)
++    {
++        WARN("Failed to query H.265 video capabilities, vr %s.\n", wined3d_debug_vkresult(vr));
++        return false;
++    }
++
++    return true;
++}
++
+ static void wined3d_decoder_vk_get_profiles(struct wined3d_adapter *adapter, unsigned int *count, GUID *profiles)
+ {
+     const struct wined3d_adapter_vk *adapter_vk = wined3d_adapter_vk(adapter);
+@@ -278,6 +334,12 @@ static void wined3d_decoder_vk_get_profiles(struct wined3d_adapter *adapter, uns
+         /* FIXME: Native GPUs also support DXVA2_ModeH264_VLD_Stereo_NoFGT
+          * and DXVA2_ModeH264_VLD_Stereo_Progressive_NoFGT. */
+     }
++
++    if (wined3d_decoder_vk_is_h265_decode_supported(adapter_vk))
++    {
++        profiles[(*count)++] = DXVA_ModeHEVC_VLD_Main;
++        /* FIXME: Main10 additionally requires P010 output support. */
++    }
+ }
+ 
+ static void wined3d_decoder_vk_destroy_object(void *object)
+@@ -476,6 +538,7 @@ out:
+ static void wined3d_decoder_vk_cs_init(void *object)
+ {
+     VkVideoDecodeH264CapabilitiesKHR h264_caps = {.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_CAPABILITIES_KHR};
++    VkVideoDecodeH265CapabilitiesKHR h265_caps = {.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_CAPABILITIES_KHR};
+     VkVideoDecodeCapabilitiesKHR decode_caps = {.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_CAPABILITIES_KHR};
+     VkVideoSessionCreateInfoKHR session_desc = {.sType = VK_STRUCTURE_TYPE_VIDEO_SESSION_CREATE_INFO_KHR};
+     VkVideoProfileInfoKHR profile = {.sType = VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR};
+@@ -497,34 +560,35 @@ static void wined3d_decoder_vk_cs_init(void *object)
+     fill_vk_profile_info(&profile, &decoder_vk->d.desc.codec, decoder_vk->d.desc.output_format);
+ 
+     if (IsEqualGUID(&decoder_vk->d.desc.codec, &DXVA_ModeH264_VLD_NoFGT))
+-    {
+-        caps.pNext = &decode_caps;
+         decode_caps.pNext = &h264_caps;
+-
+-        vr = VK_CALL(vkGetPhysicalDeviceVideoCapabilitiesKHR(adapter_vk->physical_device, &profile, &caps));
+-        if (vr != VK_SUCCESS)
+-        {
+-            ERR("Device does not support the requested caps, vr %s.\n", wined3d_debug_vkresult(vr));
+-            return;
+-        }
+-
+-        session_desc.maxCodedExtent = caps.maxCodedExtent;
+-        session_desc.maxDpbSlots = caps.maxDpbSlots;
+-        session_desc.maxActiveReferencePictures = caps.maxActiveReferencePictures;
+-        session_desc.pStdHeaderVersion = &caps.stdHeaderVersion;
+-
+-        if (decode_caps.flags & VK_VIDEO_DECODE_CAPABILITY_DPB_AND_OUTPUT_DISTINCT_BIT_KHR)
+-            decoder_vk->distinct_dpb = true;
+-
+-        if (!(caps.flags & VK_VIDEO_CAPABILITY_SEPARATE_REFERENCE_IMAGES_BIT_KHR))
+-            decoder_vk->layered_dpb = true;
+-    }
++    else if (IsEqualGUID(&decoder_vk->d.desc.codec, &DXVA_ModeHEVC_VLD_Main))
++        decode_caps.pNext = &h265_caps;
+     else
+     {
+         ERR("Unsupported codec %s.\n", debugstr_guid(&decoder_vk->d.desc.codec));
+         return;
+     }
+ 
++    caps.pNext = &decode_caps;
++
++    vr = VK_CALL(vkGetPhysicalDeviceVideoCapabilitiesKHR(adapter_vk->physical_device, &profile, &caps));
++    if (vr != VK_SUCCESS)
++    {
++        ERR("Device does not support the requested caps, vr %s.\n", wined3d_debug_vkresult(vr));
++        return;
++    }
++
++    session_desc.maxCodedExtent = caps.maxCodedExtent;
++    session_desc.maxDpbSlots = caps.maxDpbSlots;
++    session_desc.maxActiveReferencePictures = caps.maxActiveReferencePictures;
++    session_desc.pStdHeaderVersion = &caps.stdHeaderVersion;
++
++    if (decode_caps.flags & VK_VIDEO_DECODE_CAPABILITY_DPB_AND_OUTPUT_DISTINCT_BIT_KHR)
++        decoder_vk->distinct_dpb = true;
++
++    if (!(caps.flags & VK_VIDEO_CAPABILITY_SEPARATE_REFERENCE_IMAGES_BIT_KHR))
++        decoder_vk->layered_dpb = true;
++
+     if ((vr = VK_CALL(vkCreateVideoSessionKHR(device_vk->vk_device,
+             &session_desc, NULL, &decoder_vk->vk_session))))
+     {
+@@ -902,6 +966,241 @@ static VkVideoSessionParametersKHR create_h264_params(struct wined3d_decoder_vk
+     return VK_NULL_HANDLE;
+ }
+ 
++static StdVideoH265LevelIdc get_vk_h265_level(unsigned int luma_samples)
++{
++    /* MaxLumaPs from table A.8 of the H.265 specification. Levels which share
++     * a MaxLumaPs are collapsed to the lowest of the group; we have no bitrate
++     * information with which to distinguish them, and the decoder only needs a
++     * level that is not smaller than the stream's. */
++    static const struct
++    {
++        StdVideoH265LevelIdc level;
++        unsigned int max_luma_ps;
++    }
++    levels[] =
++    {
++        {STD_VIDEO_H265_LEVEL_IDC_6_0, 35651584},
++        {STD_VIDEO_H265_LEVEL_IDC_5_0,  8912896},
++        {STD_VIDEO_H265_LEVEL_IDC_4_0,  2228224},
++        {STD_VIDEO_H265_LEVEL_IDC_3_1,   983040},
++        {STD_VIDEO_H265_LEVEL_IDC_3_0,   552960},
++        {STD_VIDEO_H265_LEVEL_IDC_2_1,   245760},
++        {STD_VIDEO_H265_LEVEL_IDC_2_0,   122880},
++        {STD_VIDEO_H265_LEVEL_IDC_1_0,    36864},
++    };
++
++    if (luma_samples > levels[0].max_luma_ps)
++    {
++        ERR("Luma sample count %u exceeds the limit for any known level!\n", luma_samples);
++        return STD_VIDEO_H265_LEVEL_IDC_6_2;
++    }
++
++    for (unsigned int i = 0; i < ARRAY_SIZE(levels) - 1; ++i)
++    {
++        if (luma_samples > levels[i + 1].max_luma_ps)
++            return levels[i].level;
++    }
++    return STD_VIDEO_H265_LEVEL_IDC_1_0;
++}
++
++static VkVideoSessionParametersKHR create_h265_params(struct wined3d_decoder_vk *decoder_vk,
++        struct wined3d_context_vk *context_vk)
++{
++    VkVideoDecodeH265SessionParametersCreateInfoKHR h265_create_info =
++            {.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_SESSION_PARAMETERS_CREATE_INFO_KHR};
++    VkVideoDecodeH265SessionParametersAddInfoKHR h265_add_info =
++            {.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_SESSION_PARAMETERS_ADD_INFO_KHR};
++    VkVideoSessionParametersCreateInfoKHR create_info =
++            {.sType = VK_STRUCTURE_TYPE_VIDEO_SESSION_PARAMETERS_CREATE_INFO_KHR};
++    struct wined3d_device_vk *device_vk = wined3d_device_vk(decoder_vk->d.device);
++    const struct wined3d_vk_info *vk_info = &device_vk->vk_info;
++    unsigned int min_cb_size, width, height;
++    StdVideoH265ProfileTierLevel profile_tier_level = {0};
++    StdVideoH265SequenceParameterSet sps = {0};
++    StdVideoH265PictureParameterSet pps = {0};
++    StdVideoH265VideoParameterSet vps = {0};
++    StdVideoH265ScalingLists scaling_lists;
++    StdVideoH265DecPicBufMgr dpb_mgr = {0};
++    const DXVA_PicParams_HEVC *h265_params;
++    VkVideoSessionParametersKHR vk_params;
++    const DXVA_Qmatrix_HEVC *matrices;
++    VkResult vr;
++
++    h265_params = wined3d_buffer_load_sysmem(decoder_vk->d.parameters, &context_vk->c);
++    /* Unlike H.264, HEVC scaling lists are optional; only touch the
++     * quantisation matrix buffer when the stream actually uses them. */
++    matrices = h265_params->scaling_list_enabled_flag
++            ? wined3d_buffer_load_sysmem(decoder_vk->d.matrix, &context_vk->c) : NULL;
++
++    create_info.pNext = &h265_create_info;
++    create_info.videoSession = decoder_vk->vk_session;
++
++    h265_create_info.maxStdVPSCount = 1;
++    h265_create_info.maxStdSPSCount = 1;
++    h265_create_info.maxStdPPSCount = 1;
++    h265_create_info.pParametersAddInfo = &h265_add_info;
++
++    h265_add_info.stdVPSCount = 1;
++    h265_add_info.pStdVPSs = &vps;
++    h265_add_info.stdSPSCount = 1;
++    h265_add_info.pStdSPSs = &sps;
++    h265_add_info.stdPPSCount = 1;
++    h265_add_info.pStdPPSs = &pps;
++
++    /* DXVA gives the picture size in minimum coding blocks, so scale it back
++     * up to luma samples. */
++    min_cb_size = 1u << (h265_params->log2_min_luma_coding_block_size_minus3 + 3);
++    width = h265_params->PicWidthInMinCbsY * min_cb_size;
++    height = h265_params->PicHeightInMinCbsY * min_cb_size;
++
++    /* As with H.264, DXVA conveys no profile information; the HEVC DXVA
++     * specification ties DXVA_ModeHEVC_VLD_Main to the Main profile. */
++    profile_tier_level.general_profile_idc = STD_VIDEO_H265_PROFILE_IDC_MAIN;
++    profile_tier_level.general_level_idc = get_vk_h265_level(width * height);
++
++    /* DXVA only gives us sps_max_dec_pic_buffering_minus1 for the highest
++     * sub-layer, and no reorder/latency information at all. Fill sub-layer 0
++     * and let sps_sub_layer_ordering_info_present_flag stay clear. */
++    dpb_mgr.max_dec_pic_buffering_minus1[0] = h265_params->sps_max_dec_pic_buffering_minus1;
++    dpb_mgr.max_num_reorder_pics[0] = h265_params->NoPicReorderingFlag
++            ? 0 : h265_params->sps_max_dec_pic_buffering_minus1;
++    dpb_mgr.max_latency_increase_plus1[0] = 0;
++
++    /* Video parameter set. DXVA has no VPS-level data of its own; everything
++     * the decoder needs is duplicated in the SPS, so emit a minimal VPS whose
++     * only job is to be referenced by the SPS. */
++    vps.vps_video_parameter_set_id = 0;
++    vps.vps_max_sub_layers_minus1 = 0;
++    vps.pDecPicBufMgr = &dpb_mgr;
++    vps.pProfileTierLevel = &profile_tier_level;
++    /* We have no HRD information, and it is not needed to reconstruct the
++     * image. This is also the field whose nested pointers caused
++     * VK_KHR_video_decode_h265 to be blocklisted in make_vulkan. */
++    vps.pHrdParameters = NULL;
++
++    sps.flags.sps_temporal_id_nesting_flag = 0;
++    sps.flags.separate_colour_plane_flag = h265_params->separate_colour_plane_flag;
++    /* As with H.264, DXVA defers cropping to the application. */
++    sps.flags.conformance_window_flag = 0;
++    sps.flags.sps_sub_layer_ordering_info_present_flag = 0;
++    sps.flags.scaling_list_enabled_flag = h265_params->scaling_list_enabled_flag;
++    /* DXVA always supplies a quantisation matrix buffer, so if scaling lists
++     * are enabled at all we treat them as present in the SPS. */
++    sps.flags.sps_scaling_list_data_present_flag = h265_params->scaling_list_enabled_flag;
++    sps.flags.amp_enabled_flag = h265_params->amp_enabled_flag;
++    sps.flags.sample_adaptive_offset_enabled_flag = h265_params->sample_adaptive_offset_enabled_flag;
++    sps.flags.pcm_enabled_flag = h265_params->pcm_enabled_flag;
++    sps.flags.pcm_loop_filter_disabled_flag = h265_params->pcm_loop_filter_disabled_flag;
++    sps.flags.long_term_ref_pics_present_flag = h265_params->long_term_ref_pics_present_flag;
++    sps.flags.sps_temporal_mvp_enabled_flag = h265_params->sps_temporal_mvp_enabled_flag;
++    sps.flags.strong_intra_smoothing_enabled_flag = h265_params->strong_intra_smoothing_enabled_flag;
++    /* We have no VUI parameters; they are not needed to construct the image. */
++    sps.flags.vui_parameters_present_flag = 0;
++    sps.flags.sps_extension_present_flag = 0;
++
++    sps.chroma_format_idc = h265_params->chroma_format_idc;
++    sps.pic_width_in_luma_samples = width;
++    sps.pic_height_in_luma_samples = height;
++    /* See the H.264 path s.v. seq_parameter_set_id: the IDs only need to be
++     * self-consistent, since we submit exactly one of each per frame. */
++    sps.sps_video_parameter_set_id = 0;
++    sps.sps_max_sub_layers_minus1 = 0;
++    sps.sps_seq_parameter_set_id = 0;
++    sps.bit_depth_luma_minus8 = h265_params->bit_depth_luma_minus8;
++    sps.bit_depth_chroma_minus8 = h265_params->bit_depth_chroma_minus8;
++    sps.log2_max_pic_order_cnt_lsb_minus4 = h265_params->log2_max_pic_order_cnt_lsb_minus4;
++    sps.log2_min_luma_coding_block_size_minus3 = h265_params->log2_min_luma_coding_block_size_minus3;
++    sps.log2_diff_max_min_luma_coding_block_size = h265_params->log2_diff_max_min_luma_coding_block_size;
++    sps.log2_min_luma_transform_block_size_minus2 = h265_params->log2_min_transform_block_size_minus2;
++    sps.log2_diff_max_min_luma_transform_block_size = h265_params->log2_diff_max_min_transform_block_size;
++    sps.max_transform_hierarchy_depth_inter = h265_params->max_transform_hierarchy_depth_inter;
++    sps.max_transform_hierarchy_depth_intra = h265_params->max_transform_hierarchy_depth_intra;
++    sps.num_short_term_ref_pic_sets = h265_params->num_short_term_ref_pic_sets;
++    sps.num_long_term_ref_pics_sps = h265_params->num_long_term_ref_pics_sps;
++    sps.pcm_sample_bit_depth_luma_minus1 = h265_params->pcm_sample_bit_depth_luma_minus1;
++    sps.pcm_sample_bit_depth_chroma_minus1 = h265_params->pcm_sample_bit_depth_chroma_minus1;
++    sps.log2_min_pcm_luma_coding_block_size_minus3 = h265_params->log2_min_pcm_luma_coding_block_size_minus3;
++    sps.log2_diff_max_min_pcm_luma_coding_block_size = h265_params->log2_diff_max_min_pcm_luma_coding_block_size;
++    sps.pProfileTierLevel = &profile_tier_level;
++    sps.pDecPicBufMgr = &dpb_mgr;
++    sps.pScalingLists = h265_params->scaling_list_enabled_flag ? &scaling_lists : NULL;
++    /* The short-term ref pic sets are parsed out of the slice header by the
++     * driver; DXVA passes wNumBitsForShortTermRPSInSlice for that purpose. */
++    sps.pShortTermRefPicSet = NULL;
++    sps.pLongTermRefPicsSps = NULL;
++    sps.pSequenceParameterSetVui = NULL;
++    sps.pPredictorPaletteEntries = NULL;
++
++    pps.flags.dependent_slice_segments_enabled_flag = h265_params->dependent_slice_segments_enabled_flag;
++    pps.flags.output_flag_present_flag = h265_params->output_flag_present_flag;
++    pps.flags.sign_data_hiding_enabled_flag = h265_params->sign_data_hiding_enabled_flag;
++    pps.flags.cabac_init_present_flag = h265_params->cabac_init_present_flag;
++    pps.flags.constrained_intra_pred_flag = h265_params->constrained_intra_pred_flag;
++    pps.flags.transform_skip_enabled_flag = h265_params->transform_skip_enabled_flag;
++    pps.flags.cu_qp_delta_enabled_flag = h265_params->cu_qp_delta_enabled_flag;
++    pps.flags.pps_slice_chroma_qp_offsets_present_flag = h265_params->pps_slice_chroma_qp_offsets_present_flag;
++    pps.flags.weighted_pred_flag = h265_params->weighted_pred_flag;
++    pps.flags.weighted_bipred_flag = h265_params->weighted_bipred_flag;
++    pps.flags.transquant_bypass_enabled_flag = h265_params->transquant_bypass_enabled_flag;
++    pps.flags.tiles_enabled_flag = h265_params->tiles_enabled_flag;
++    pps.flags.entropy_coding_sync_enabled_flag = h265_params->entropy_coding_sync_enabled_flag;
++    pps.flags.uniform_spacing_flag = h265_params->uniform_spacing_flag;
++    pps.flags.loop_filter_across_tiles_enabled_flag = h265_params->loop_filter_across_tiles_enabled_flag;
++    pps.flags.pps_loop_filter_across_slices_enabled_flag = h265_params->pps_loop_filter_across_slices_enabled_flag;
++    /* DXVA has no deblocking_filter_control_present_flag, but it does have the
++     * override flag and the disable flag, either of which implies it. */
++    pps.flags.deblocking_filter_control_present_flag = h265_params->deblocking_filter_override_enabled_flag
++            || h265_params->pps_deblocking_filter_disabled_flag;
++    pps.flags.deblocking_filter_override_enabled_flag = h265_params->deblocking_filter_override_enabled_flag;
++    pps.flags.pps_deblocking_filter_disabled_flag = h265_params->pps_deblocking_filter_disabled_flag;
++    pps.flags.pps_scaling_list_data_present_flag = h265_params->scaling_list_enabled_flag;
++    pps.flags.lists_modification_present_flag = h265_params->lists_modification_present_flag;
++    pps.flags.slice_segment_header_extension_present_flag
++            = h265_params->slice_segment_header_extension_present_flag;
++    pps.flags.pps_extension_present_flag = 0;
++
++    pps.pps_pic_parameter_set_id = 0;
++    pps.pps_seq_parameter_set_id = 0;
++    pps.sps_video_parameter_set_id = 0;
++    pps.num_extra_slice_header_bits = h265_params->num_extra_slice_header_bits;
++    pps.num_ref_idx_l0_default_active_minus1 = h265_params->num_ref_idx_l0_default_active_minus1;
++    pps.num_ref_idx_l1_default_active_minus1 = h265_params->num_ref_idx_l1_default_active_minus1;
++    pps.init_qp_minus26 = h265_params->init_qp_minus26;
++    pps.diff_cu_qp_delta_depth = h265_params->diff_cu_qp_delta_depth;
++    pps.pps_cb_qp_offset = h265_params->pps_cb_qp_offset;
++    pps.pps_cr_qp_offset = h265_params->pps_cr_qp_offset;
++    pps.pps_beta_offset_div2 = h265_params->pps_beta_offset_div2;
++    pps.pps_tc_offset_div2 = h265_params->pps_tc_offset_div2;
++    pps.log2_parallel_merge_level_minus2 = h265_params->log2_parallel_merge_level_minus2;
++    pps.num_tile_columns_minus1 = h265_params->num_tile_columns_minus1;
++    pps.num_tile_rows_minus1 = h265_params->num_tile_rows_minus1;
++    /* Both sides use the same fixed bounds: 19 columns and 21 rows. */
++    memcpy(pps.column_width_minus1, h265_params->column_width_minus1, sizeof(pps.column_width_minus1));
++    memcpy(pps.row_height_minus1, h265_params->row_height_minus1, sizeof(pps.row_height_minus1));
++    pps.pScalingLists = h265_params->scaling_list_enabled_flag ? &scaling_lists : NULL;
++    pps.pPredictorPaletteEntries = NULL;
++
++    /* DXVA's scaling list layout matches Vulkan's exactly, including the
++     * separate DC coefficient arrays for the 16x16 and 32x32 lists. */
++    if (matrices)
++    {
++        memcpy(scaling_lists.ScalingList4x4, matrices->ucScalingLists0, sizeof(scaling_lists.ScalingList4x4));
++        memcpy(scaling_lists.ScalingList8x8, matrices->ucScalingLists1, sizeof(scaling_lists.ScalingList8x8));
++        memcpy(scaling_lists.ScalingList16x16, matrices->ucScalingLists2, sizeof(scaling_lists.ScalingList16x16));
++        memcpy(scaling_lists.ScalingList32x32, matrices->ucScalingLists3, sizeof(scaling_lists.ScalingList32x32));
++        memcpy(scaling_lists.ScalingListDCCoef16x16, matrices->ucScalingListDCCoefSizeID2,
++                sizeof(scaling_lists.ScalingListDCCoef16x16));
++        memcpy(scaling_lists.ScalingListDCCoef32x32, matrices->ucScalingListDCCoefSizeID3,
++                sizeof(scaling_lists.ScalingListDCCoef32x32));
++    }
++
++    if ((vr = VK_CALL(vkCreateVideoSessionParametersKHR(device_vk->vk_device,
++            &create_info, NULL, &vk_params))) == VK_SUCCESS)
++        return vk_params;
++    ERR("Failed to create H.265 parameters, vr %d.\n", vr);
++    return VK_NULL_HANDLE;
++}
++
+ struct h264_reference_info
+ {
+     VkVideoPictureResourceInfoKHR picture_info;
+@@ -927,6 +1226,31 @@ static void init_h264_reference_info(VkVideoReferenceSlotInfoKHR *reference_slot
+     info->h264_dpb_slot.pStdReferenceInfo = &info->h264_reference;
+ }
+ 
++struct h265_reference_info
++{
++    VkVideoPictureResourceInfoKHR picture_info;
++    VkVideoDecodeH265DpbSlotInfoKHR h265_dpb_slot;
++    StdVideoDecodeH265ReferenceInfo h265_reference;
++};
++
++static void init_h265_reference_info(VkVideoReferenceSlotInfoKHR *reference_slot,
++        struct h265_reference_info *info, struct wined3d_decoder_vk *decoder_vk, unsigned int slot_index)
++{
++    reference_slot->sType = VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR;
++    reference_slot->pNext = &info->h265_dpb_slot;
++    reference_slot->slotIndex = slot_index;
++    reference_slot->pPictureResource = &info->picture_info;
++
++    info->picture_info.sType = VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR;
++    info->picture_info.codedExtent.width = decoder_vk->d.desc.width;
++    info->picture_info.codedExtent.height = decoder_vk->d.desc.height;
++    info->picture_info.baseArrayLayer = 0;
++    info->picture_info.imageViewBinding = decoder_vk->images[slot_index].dpb_view;
++
++    info->h265_dpb_slot.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_DPB_SLOT_INFO_KHR;
++    info->h265_dpb_slot.pStdReferenceInfo = &info->h265_reference;
++}
++
+ static bool find_reference_slot(struct wined3d_decoder_vk *decoder_vk,
+         uint8_t dxva_index, unsigned int *vulkan_index)
+ {
+@@ -1259,6 +1583,220 @@ out:
+     free(slice_offsets);
+ }
+ 
++/* DXVA's RefPicSetStCurrBefore/After/LtCurr hold indices into RefPicList,
++ * whereas Vulkan wants DPB slot indices. */
++static uint8_t map_h265_ref_pic_set_entry(const uint8_t *slot_map, size_t map_size, uint8_t entry)
++{
++    if (entry == 0xff || entry >= map_size)
++        return 0xff;
++    return slot_map[entry];
++}
++
++static void wined3d_decoder_vk_decode_h265(struct wined3d_decoder_vk *decoder_vk, struct wined3d_context_vk *context_vk,
++        struct wined3d_decoder_output_view_vk *output_view_vk, VkVideoDecodeInfoKHR *decode_info,
++        const DXVA_PicParams_HEVC *h265_params, const void *slice_control, unsigned int slice_control_size)
++{
++    VkVideoDecodeH265PictureInfoKHR vk_h265_picture = {.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_PICTURE_INFO_KHR};
++    VkVideoReferenceSlotInfoKHR setup_reference_slot = {.sType = VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR};
++    VkVideoBeginCodingInfoKHR begin_info = {.sType = VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR};
++    VkVideoEndCodingInfoKHR end_info = {.sType = VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR};
++    VkVideoReferenceSlotInfoKHR reference_slots[MAX_VK_DECODE_REFERENCE_SLOTS + 1] = {0};
++    struct h265_reference_info references[MAX_VK_DECODE_REFERENCE_SLOTS] = {0};
++    uint8_t slot_map[ARRAY_SIZE(h265_params->RefPicList)];
++    const struct wined3d_vk_info *vk_info = context_vk->vk_info;
++    StdVideoDecodeH265PictureInfo h265_picture = {0};
++    struct h265_reference_info setup_reference = {0};
++    StdVideoDecodeH265ReferenceInfo *h265_reference;
++    const DXVA_Slice_HEVC_Short *slices = slice_control;
++    struct wined3d_decoder_image_vk *image;
++    VkVideoSessionParametersKHR vk_params;
++    unsigned int slot_count = 0;
++    unsigned int slot_index;
++    uint32_t *slice_offsets;
++    size_t slice_count;
++
++    /* Unlike H.264, the DXVA HEVC specification defines only a short slice
++     * control structure. */
++    slice_count = slice_control_size / sizeof(*slices);
++    if (!(slice_offsets = malloc(slice_count * sizeof(*slice_offsets))))
++        return;
++    for (size_t i = 0; i < slice_count; ++i)
++        slice_offsets[i] = slices[i].BSNALunitDataLocation;
++
++    if (!(vk_params = create_h265_params(decoder_vk, context_vk)))
++    {
++        free(slice_offsets);
++        return;
++    }
++
++    /* See the H.264 path for why slots are recycled this way. */
++    for (unsigned int i = 0; i < ARRAY_SIZE(decoder_vk->images); ++i)
++        decoder_vk->images[i].used = false;
++
++    memset(slot_map, 0xff, sizeof(slot_map));
++
++    begin_info.videoSession = decoder_vk->vk_session;
++    begin_info.videoSessionParameters = vk_params;
++
++    TRACE("Decoding frame %02x, POC %d, reference frames",
++            h265_params->CurrPic.bPicEntry, h265_params->CurrPicOrderCntVal);
++
++    for (unsigned int i = 0; i < ARRAY_SIZE(h265_params->RefPicList); ++i)
++    {
++        if (h265_params->RefPicList[i].bPicEntry == 0xff)
++            continue;
++
++        TRACE(" %02x/%d", h265_params->RefPicList[i].bPicEntry, h265_params->PicOrderCntValList[i]);
++
++        if (h265_params->RefPicList[i].Index7Bits == h265_params->CurrPic.Index7Bits)
++            continue;
++
++        if (!find_reference_slot(decoder_vk, h265_params->RefPicList[i].Index7Bits, &slot_index))
++            goto out;
++        image = &decoder_vk->images[slot_index];
++
++        image->used = true;
++        slot_map[i] = slot_index;
++
++        if (decoder_vk->layered_dpb)
++        {
++            if (decoder_vk->distinct_dpb)
++                wined3d_context_vk_reference_image(context_vk, &decoder_vk->layered_dpb_image);
++            else
++                wined3d_context_vk_reference_image(context_vk, &decoder_vk->layered_output_image);
++        }
++        else
++        {
++            if (decoder_vk->distinct_dpb)
++                wined3d_context_vk_reference_image(context_vk, &image->dpb_image);
++            else
++                wined3d_context_vk_reference_image(context_vk, &image->output_image);
++        }
++
++        init_h265_reference_info(&reference_slots[slot_count], &references[slot_count], decoder_vk, slot_index);
++
++        h265_reference = &references[slot_count].h265_reference;
++        h265_reference->flags.used_for_long_term_reference = h265_params->RefPicList[i].AssociatedFlag;
++        h265_reference->flags.unused_for_reference = 0;
++        h265_reference->PicOrderCntVal = h265_params->PicOrderCntValList[i];
++
++        ++slot_count;
++    }
++
++    TRACE(".\n");
++
++    /* Current decoding reference slot. */
++
++    if (!find_unused_slot(decoder_vk, &slot_index))
++    {
++        ERR("No unused reference slot.\n");
++        goto out;
++    }
++    image = &decoder_vk->images[slot_index];
++
++    image->dxva_index = h265_params->CurrPic.Index7Bits;
++
++    if (!image->output_view)
++    {
++        VkImageUsageFlags usage = VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
++
++        if (!decoder_vk->distinct_dpb)
++            usage |= VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
++
++        if (!wined3d_decoder_vk_create_image(decoder_vk, context_vk, usage,
++                VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR, &image->output_image, &image->output_view))
++            goto out;
++
++        if (decoder_vk->distinct_dpb)
++        {
++            if (!wined3d_decoder_vk_create_image(decoder_vk, context_vk, VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR,
++                    VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR, &image->dpb_image, &image->dpb_view))
++                goto out;
++            wined3d_context_vk_reference_image(context_vk, &image->dpb_image);
++        }
++        else
++        {
++            image->dpb_view = image->output_view;
++        }
++    }
++    if (decoder_vk->layered_dpb)
++        wined3d_context_vk_reference_image(context_vk, &decoder_vk->layered_output_image);
++    else
++        wined3d_context_vk_reference_image(context_vk, &image->output_image);
++
++    init_h265_reference_info(&setup_reference_slot, &setup_reference, decoder_vk, slot_index);
++
++    h265_reference = &setup_reference.h265_reference;
++    /* As with H.264, Mesa suggests drivers ignore everything in
++     * pSetupReferenceSlot beyond the slot index and image view. */
++    h265_reference->flags.used_for_long_term_reference = 0;
++    h265_reference->flags.unused_for_reference = 0;
++    h265_reference->PicOrderCntVal = h265_params->CurrPicOrderCntVal;
++
++    reference_slots[slot_count] = setup_reference_slot;
++    reference_slots[slot_count].slotIndex = -1;
++
++    begin_info.referenceSlotCount = slot_count + 1;
++    begin_info.pReferenceSlots = reference_slots;
++
++    vk_h265_picture.pStdPictureInfo = &h265_picture;
++    vk_h265_picture.sliceSegmentCount = slice_count;
++    vk_h265_picture.pSliceSegmentOffsets = slice_offsets;
++
++    decode_info->pNext = &vk_h265_picture;
++    decode_info->pSetupReferenceSlot = &setup_reference_slot;
++    decode_info->pReferenceSlots = reference_slots;
++    decode_info->referenceSlotCount = slot_count;
++    decode_info->dstPictureResource.imageViewBinding = image->output_view;
++
++    h265_picture.flags.IrapPicFlag = h265_params->IrapPicFlag;
++    h265_picture.flags.IdrPicFlag = h265_params->IdrPicFlag;
++    /* DXVA does not convey whether the current picture is itself a reference.
++     * Reporting 1 is the conservative choice: it keeps the picture available
++     * in the DPB for subsequent frames. */
++    h265_picture.flags.IsReference = 1;
++    /* DXVA signals an in-slice short-term RPS by giving its length in bits;
++     * a length of zero means the set is taken from the SPS instead. */
++    h265_picture.flags.short_term_ref_pic_set_sps_flag = !h265_params->wNumBitsForShortTermRPSInSlice;
++    /* See the H.264 path s.v. seq_parameter_set_id. */
++    h265_picture.sps_video_parameter_set_id = 0;
++    h265_picture.pps_seq_parameter_set_id = 0;
++    h265_picture.pps_pic_parameter_set_id = 0;
++    h265_picture.NumDeltaPocsOfRefRpsIdx = h265_params->ucNumDeltaPocsOfRefRpsIdx;
++    h265_picture.PicOrderCntVal = h265_params->CurrPicOrderCntVal;
++    h265_picture.NumBitsForSTRefPicSetInSlice = h265_params->wNumBitsForShortTermRPSInSlice;
++
++    for (unsigned int i = 0; i < ARRAY_SIZE(h265_picture.RefPicSetStCurrBefore); ++i)
++    {
++        h265_picture.RefPicSetStCurrBefore[i] = map_h265_ref_pic_set_entry(slot_map,
++                ARRAY_SIZE(slot_map), h265_params->RefPicSetStCurrBefore[i]);
++        h265_picture.RefPicSetStCurrAfter[i] = map_h265_ref_pic_set_entry(slot_map,
++                ARRAY_SIZE(slot_map), h265_params->RefPicSetStCurrAfter[i]);
++        h265_picture.RefPicSetLtCurr[i] = map_h265_ref_pic_set_entry(slot_map,
++                ARRAY_SIZE(slot_map), h265_params->RefPicSetLtCurr[i]);
++    }
++
++    VK_CALL(vkCmdBeginVideoCodingKHR(decoder_vk->command_buffer.vk_command_buffer, &begin_info));
++    if (!decoder_vk->initialized)
++        wined3d_decoder_vk_initialize(decoder_vk, vk_info);
++    VK_CALL(vkCmdDecodeVideoKHR(decoder_vk->command_buffer.vk_command_buffer, decode_info));
++    VK_CALL(vkCmdEndVideoCodingKHR(decoder_vk->command_buffer.vk_command_buffer, &end_info));
++
++    submit_decode_command_buffer(decoder_vk, context_vk);
++
++    wined3d_decoder_vk_blit_output(decoder_vk, context_vk, output_view_vk, slot_index);
++
++    EnterCriticalSection(&decoder_vk->d.feedback_cs);
++    decoder_vk->d.feedback_number = h265_params->StatusReportFeedbackNumber;
++    decoder_vk->d.feedback_pic_entry = h265_params->CurrPic.bPicEntry;
++    decoder_vk->d.feedback_field = 0;
++    LeaveCriticalSection(&decoder_vk->d.feedback_cs);
++
++out:
++    wined3d_context_vk_destroy_vk_video_parameters(context_vk, vk_params, context_vk->current_command_buffer.id);
++    free(slice_offsets);
++}
++
+ static void wined3d_decoder_vk_decode(struct wined3d_context *context, struct wined3d_decoder *decoder,
+         struct wined3d_decoder_output_view *output_view,
+         unsigned int bitstream_size, unsigned int slice_control_size)
+@@ -1293,8 +1831,14 @@ static void wined3d_decoder_vk_decode(struct wined3d_context *context, struct wi
+     decode_info.dstPictureResource.codedExtent.height = decoder_vk->d.desc.height;
+     decode_info.dstPictureResource.baseArrayLayer = 0;
+ 
+-    wined3d_decoder_vk_decode_h264(decoder_vk, context_vk, output_view_vk,
+-            &decode_info, parameters, slice_control, slice_control_size);
++    if (IsEqualGUID(&decoder_vk->d.desc.codec, &DXVA_ModeH264_VLD_NoFGT))
++        wined3d_decoder_vk_decode_h264(decoder_vk, context_vk, output_view_vk,
++                &decode_info, parameters, slice_control, slice_control_size);
++    else if (IsEqualGUID(&decoder_vk->d.desc.codec, &DXVA_ModeHEVC_VLD_Main))
++        wined3d_decoder_vk_decode_h265(decoder_vk, context_vk, output_view_vk,
++                &decode_info, parameters, slice_control, slice_control_size);
++    else
++        ERR("Unsupported codec %s.\n", debugstr_guid(&decoder_vk->d.desc.codec));
+ 
+     wined3d_context_vk_reference_bo(context_vk, bitstream_bo);
+     wined3d_context_vk_reference_texture(context_vk, wined3d_texture_vk(texture));
+diff --git a/dlls/wined3d/wined3d_vk.h b/dlls/wined3d/wined3d_vk.h
+index 6fcfe2af..8a191452 100644
+--- a/dlls/wined3d/wined3d_vk.h
++++ b/dlls/wined3d/wined3d_vk.h
+@@ -264,6 +264,7 @@ enum wined3d_vk_extension
+     WINED3D_VK_KHR_SAMPLER_YCBCR_CONVERSION,
+     WINED3D_VK_KHR_SHADER_DRAW_PARAMETERS,
+     WINED3D_VK_KHR_VIDEO_DECODE_H264,
++    WINED3D_VK_KHR_VIDEO_DECODE_H265,
+     WINED3D_VK_KHR_VIDEO_QUEUE,
+ 
+     WINED3D_VK_EXT_COUNT,
+-- 
+2.55.0
+

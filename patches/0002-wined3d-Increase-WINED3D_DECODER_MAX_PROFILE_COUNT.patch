@@ -1,0 +1,31 @@
+From 524049014cfe4c012c7e46b74ffb70f5e0d0ea5e Mon Sep 17 00:00:00 2001
+From: changeforan <7800290+changeforan@users.noreply.github.com>
+Date: Sat, 22 Aug 2026 19:20:39 +0800
+Subject: [PATCH 2/5] wined3d: Increase WINED3D_DECODER_MAX_PROFILE_COUNT.
+
+The decoder profile array is stack allocated by callers of
+get_profiles(), so the bound must cover every profile the backend can
+report.  A bound of one is only safe while exactly one codec is
+supported; reporting a second profile smashes the caller's stack.
+---
+ dlls/wined3d/wined3d_private.h | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/wined3d/wined3d_private.h b/dlls/wined3d/wined3d_private.h
+index 934239e6..a2158fb2 100644
+--- a/dlls/wined3d/wined3d_private.h
++++ b/dlls/wined3d/wined3d_private.h
+@@ -4509,7 +4509,9 @@ struct wined3d_palette
+     uint32_t flags;
+ };
+ 
+-#define WINED3D_DECODER_MAX_PROFILE_COUNT 1
++/* Currently H.264 (DXVA_ModeH264_VLD_NoFGT) and HEVC (DXVA_ModeHEVC_VLD_Main).
++ * Leave headroom for the H.264 stereo variants and HEVC Main10. */
++#define WINED3D_DECODER_MAX_PROFILE_COUNT 8
+ 
+ struct wined3d_decoder_ops
+ {
+-- 
+2.55.0
+

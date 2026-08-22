@@ -1,0 +1,38 @@
+From c654765c69cc41a0accd8081e4d62c9e7a9e12e1 Mon Sep 17 00:00:00 2001
+From: changeforan <7800290+changeforan@users.noreply.github.com>
+Date: Sat, 22 Aug 2026 19:20:39 +0800
+Subject: [PATCH 1/5] wined3d: Use the UNORM variants as the canonical NV12
+ plane formats.
+
+The plane formats are used both to validate texture views of a planar
+format and to derive the planar format's capabilities.  Direct3D uses
+R8_UNORM and R8G8_UNORM for views of the two NV12 planes, and Vulkan
+requires VK_FORMAT_R8_UNORM for a PLANE_0 view of
+VK_FORMAT_G8_B8R8_2PLANE_420_UNORM, so the UINT variants are wrong on
+both counts.
+
+Without this, CreateShaderResourceView() fails with E_INVALIDARG for any
+application that samples NV12 planes directly.
+---
+ dlls/wined3d/utils.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/wined3d/utils.c b/dlls/wined3d/utils.c
+index 6091f6bd..c3b68456 100644
+--- a/dlls/wined3d/utils.c
++++ b/dlls/wined3d/utils.c
+@@ -719,7 +719,10 @@ static const struct
+ }
+ format_plane_info[] =
+ {
+-    {WINED3DFMT_NV12_PLANAR, {WINED3DFMT_R8_UINT, WINED3DFMT_R8G8_UINT}, 2, 2},
++    /* D3D11 plane views of NV12 use the UNORM variants (R8_UNORM for the luma
++     * plane, R8G8_UNORM for the chroma plane), which is also what Vulkan
++     * requires for a plane view of VK_FORMAT_G8_B8R8_2PLANE_420_UNORM. */
++    {WINED3DFMT_NV12_PLANAR, {WINED3DFMT_R8_UNORM, WINED3DFMT_R8G8_UNORM}, 2, 2},
+ };
+ 
+ struct wined3d_format_vertex_info
+-- 
+2.55.0
+
