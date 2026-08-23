@@ -201,5 +201,10 @@ honest — the DXVA→Vulkan translation for them is not written.
 
 ## Licence
 
-The patches are modifications to Wine and are LGPL-2.1-or-later, like Wine itself.
-The helper scripts and test programs are trivial; treat them as public domain.
+The patches are modifications to Wine and are **LGPL-2.1-or-later**, like Wine
+itself (`COPYING.LIB`). The scripts and test programs are original trivial works
+released under **CC0-1.0** (public domain). No binaries, no Wine source tree, and
+no game files are redistributed here.
+
+See `LICENSE.md` for details — including what changes if you distribute *built
+binaries* rather than patches.
