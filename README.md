@@ -17,10 +17,10 @@ gamepad input under a patched Proton 11.0.
 
 ```
 patches/      the five commits, as git-format-patch files
-install-proton-hevc.sh   build a "Proton 11.0 (HEVC)" compatibility tool
-tools/vidprobe.c         list D3D11 decoder profiles and try to create each
-tools/nv12srv.c          minimal repro: NV12 plane shader-resource views
-tools/play-zzz.sh        launcher for a plain (non-Proton) Wine build
+install-proton-hevc.sh      build a "Proton 11.0 (HEVC)" compatibility tool
+tools/install-zzz-client.sh install the client into a normal folder, without Steam
+tools/vidprobe.c            list D3D11 decoder profiles and try to create each
+tools/nv12srv.c             minimal repro: NV12 plane shader-resource views
 ```
 
 Live branches with the same commits applied:
