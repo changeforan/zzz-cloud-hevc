@@ -1,0 +1,39 @@
+name: Hosted cleanup capacity preflight
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Test cleanup safety guards
+        run: python3 -m unittest discover -s tests -v
+      - name: Remove reviewed unused SDK directories and measure
+        env:
+          CONFIRM_EPHEMERAL_CLEANUP: 'yes'
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 tools/hosted-disk-preflight.py --report disk-report.json 2>&1 | tee cleanup.log
+      - name: Verify host tools survived
+        run: |
+          python3 --version
+          git --version
+          make --version
+          docker version
+          df -h . /var/lib/docker
+          free -h
+      - name: Upload small diagnostic reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cleanup-capacity-report
+          path: |
+            disk-report.json
+            cleanup.log
+          if-no-files-found: warn
+          retention-days: 14
