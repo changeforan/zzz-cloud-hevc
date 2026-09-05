@@ -55,6 +55,34 @@ hardware testing remain required regardless of route.
 
 ## Capacity
 
+### Scoped cleanup measurement
+
+[Hosted cleanup preflight 33957195893](https://github.com/changeforan/zzz-cloud-hevc/actions/runs/33957195893)
+at commit `1bb83f9` succeeded on `ubuntu-24.04`:
+
+| Measurement | GiB |
+|---|---:|
+| Free before | 13.47 |
+| Free after | 44.20 |
+| Reclaimed | 30.73 |
+
+`tools/hosted-disk-preflight.py` removed fixed SDK directories for Android,
+.NET, Haskell, Swift, PowerShell, Azure CLI and the hosted tool cache. `/opt/ghc`
+was absent. Cleanup took about 100 seconds. Python, Git, Make and Docker passed
+post-cleanup checks; 62 tests passed. Docker and workspace share the measured
+filesystem. No swap, packages or Docker images were removed, and no SDK layers,
+sources, builds, or large binaries were downloaded/uploaded.
+
+The manual workflow `cleanup-preflight.yml` is separate from the build workflow;
+it does not silently enable cleanup for other jobs. Its deletion helper refuses
+self-hosted/non-Ubuntu24 environments, symlinked targets, and targets containing
+the workspace, active interpreter or Docker storage. Run it only on disposable
+GitHub-hosted runners; never spoof its environment guards on a workstation.
+
+44.20 GiB remains below the initial 60 GiB guard. Neither lowering that guard nor
+assuming a build fits is justified by cleanup alone: SDK expansion, source
+checkout, compilation and packaging peak usage remain unmeasured.
+
 Default GitHub-hosted runner capacity may be insufficient. The script requires
 60 GiB free before cloning or pulling an SDK. This is a conservative initial
 guard, **not proof that the complete build fits**. It does not delete preinstalled
