@@ -13,6 +13,29 @@ No binaries are committed to Git, and no manual large input upload is required
 for the source route. The output archive still has to be uploaded as an artifact.
 There is no automatic public release step.
 
+## First hosted preflight results
+
+[Run 33946361499](https://github.com/changeforan/zzz-cloud-hevc/actions/runs/33946361499)
+on commit `0106d6a` established:
+
+- All 59 unit tests passed on `ubuntu-24.04`.
+- The source job had **13.5 GiB free**, below the 60 GiB guard, and stopped
+  before cloning sources, pulling the SDK, or checking its manifest. This is a
+  capacity-gate failure, not a compilation failure; actual build size is unmeasured.
+- DepotDownloader connected and logged into Steam anonymously, then returned
+  `Insufficient privileges to get access token for app 4628710` and
+  `App 4628710 (Proton 11.0) is not available from this account.` No manifest or
+  payload was downloaded. The diagnostic job is green because it recorded the
+  result successfully, **not** because anonymous acquisition succeeded.
+- The separate Packaging tests workflow also passed. Only tiny diagnostic logs
+  were uploaded; no local binaries or full-build artifacts were uploaded.
+
+Thus this setup is active but is **not yet a functioning public-release build**.
+Proceeding requires a deliberate runner-capacity strategy for the source route,
+or an authorized authenticated/distribution source for the overlay base. Neither
+paid resources nor Steam credentials are configured. Source/licence review and
+hardware testing remain required regardless of route.
+
 ## What was inspected
 
 - Valve's `proton-11.0-2` GitHub release has **no binary assets**. Its source
