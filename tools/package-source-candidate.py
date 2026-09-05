@@ -81,7 +81,10 @@ def source_entries(root, *, omit_top_build=False):
                 target = os.readlink(path)
                 lexical = Path(os.path.abspath(path.parent / target))
                 p.require(not os.path.isabs(target) and lexical.is_relative_to(root)
-                          and path.resolve(strict=True).is_relative_to(root), f"Unsafe source symlink: {name}")
+                          and path.resolve(strict=False).is_relative_to(root), f"Unsafe source symlink: {name}")
+                # Upstream source can link to a generated executable (e.g.
+                # Kaldi raw-nnet-init -> nnet-init). Preserve the link itself;
+                # never follow it. Binary-package links must still resolve.
             else:
                 p.require(stat.S_ISDIR(mode) or stat.S_ISREG(mode), f"Unsupported source file: {name}")
             yield name, path

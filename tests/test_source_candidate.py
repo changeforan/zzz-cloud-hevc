@@ -192,6 +192,23 @@ class SourceCandidateTests(unittest.TestCase):
         self.assertEqual(fixed["empty_dirs"], [])
         self.assertNotEqual(fixed["id"], "upstream")
 
+    def test_generated_target_source_symlink_is_preserved(self):
+        link = self.source / "raw-nnet-init"
+        link.symlink_to("nnet-init")
+        self.run_package()
+        with tarfile.open(Path(self.args.output) / "source-snapshot.tar.gz") as tar:
+            member = tar.getmember("source-snapshot/proton/raw-nnet-init")
+            self.assertTrue(member.issym())
+            self.assertEqual(member.linkname, "nnet-init")
+
+    def test_dangling_escape_source_symlink_rejected(self):
+        (self.source / "escape").symlink_to("../absent")
+        self.reject("Unsafe source symlink")
+
+    def test_dangling_binary_symlink_still_rejected(self):
+        (self.redist / "missing-link").symlink_to("absent")
+        self.reject("No such file")
+
 
 if __name__ == "__main__":
     unittest.main()
