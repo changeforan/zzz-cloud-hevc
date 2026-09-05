@@ -28,13 +28,21 @@ jobs:
           persist-credentials: false
       - name: Unit tests
         run: python3 -m unittest discover -s tests -v
+      - name: Reclaim unused hosted SDKs for build
+        if: inputs.operation == 'build'
+        env:
+          CONFIRM_EPHEMERAL_CLEANUP: 'yes'
+        run: /usr/bin/python3 tools/hosted-disk-preflight.py --report cleanup-report.json
+      - name: Install host build helpers
+        if: inputs.operation == 'build'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fontforge-nox
       - name: Capacity and SDK preflight or source build
         env:
           OPERATION: ${{ inputs.operation }}
           BUILD_VERSION: ${{ inputs.version }}
           WORK_DIR: ${{ runner.temp }}/proton-source-work
           JOBS: '2'
-          MIN_FREE_GIB: '60'
+          MIN_FREE_GIB: '35'
         run: |
           set -euo pipefail
           bash tools/build-source-candidate.sh "$OPERATION" 2>&1 | tee source-build.log
@@ -45,6 +53,7 @@ jobs:
           name: source-build-diagnostics
           path: |
             source-build.log
+            cleanup-report.json
             ${{ runner.temp }}/proton-source-work/logs/
             ${{ runner.temp }}/proton-source-work/metadata/
           if-no-files-found: warn

@@ -10,7 +10,8 @@ class WorkflowTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         text = (root / ".github/workflows/source-candidate.yml").read_text()
         self.assertIn("default: preflight", text)
-        self.assertIn("MIN_FREE_GIB: '60'", text)
+        self.assertIn("MIN_FREE_GIB: '35'", text)
+        self.assertIn("hosted-disk-preflight.py", text)
         self.assertIn("-manifest-only", text)
         self.assertNotIn("contents: write", text)
         self.assertNotIn("pull_request_target", text)

@@ -109,6 +109,9 @@ for number in 0001 0002 0003 0004 0005; do
     run git -C "$WORK_DIR/proton/wine" apply --check "${exclusions[@]}" "$patch"
     run git -C "$WORK_DIR/proton/wine" apply "${exclusions[@]}" "$patch"
 done
+cp -- "$ROOT/packaging/strip-early.patch" "$META/strip-early.patch"
+run git -C "$WORK_DIR/proton" apply --check "$META/strip-early.patch"
+run git -C "$WORK_DIR/proton" apply "$META/strip-early.patch"
 git -C "$WORK_DIR/proton/wine" diff --binary > "$META/wine.diff"
 git -C "$WORK_DIR/proton" diff --binary --submodule=diff > "$META/proton.diff"
 # Proton's generator uses its own pinned Vulkan XML 1.4.339 in the build tree.

@@ -50,7 +50,16 @@ def revisions(source, pins):
     for name in roots:
         root = source / name
         dirty = git(root, "diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "HEAD", "--name-only")
-        p.require(not dirty or name == "wine", f"Unexpected tracked changes outside Wine: {name}")
+        if dirty and name == ".":
+            p.require(dirty.splitlines() == ["Makefile.in"], "Unexpected tracked changes outside Wine: .")
+            original = git(root, "show", "HEAD:Makefile.in")
+            old = "CFLAGS += -ggdb -ffunction-sections -fdata-sections -fno-omit-frame-pointer"
+            expected = original.replace(old, old.replace("-ggdb", "-s"))
+            p.require(dirty.splitlines() == ["Makefile.in"] and original.count(old) == 1
+                      and (root / "Makefile.in").read_text() == expected,
+                      "Unexpected tracked changes outside Wine: .")
+        else:
+            p.require(not dirty or name == "wine", f"Unexpected tracked changes outside Wine: {name}")
         result[name] = {"head": git(root, "rev-parse", "HEAD").strip(),
                         "status": git(root, "status", "--porcelain", "--untracked-files=all"),
                         "diff": git(root, "diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "--binary", "HEAD")}
