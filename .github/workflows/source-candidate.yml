@@ -1,0 +1,93 @@
+name: Source-driven Proton release candidate
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Preflight only, or explicitly attempt the full source build'
+        type: choice
+        options: [preflight, build]
+        default: preflight
+        required: true
+      version:
+        description: 'Candidate version (no spaces), e.g. 11.0-2-hevc.3'
+        type: string
+        default: 11.0-2-hevc.3
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: source-candidate-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Capacity and SDK preflight or source build
+        env:
+          OPERATION: ${{ inputs.operation }}
+          BUILD_VERSION: ${{ inputs.version }}
+          WORK_DIR: ${{ runner.temp }}/proton-source-work
+          JOBS: '2'
+          MIN_FREE_GIB: '60'
+        run: |
+          set -euo pipefail
+          bash tools/build-source-candidate.sh "$OPERATION" 2>&1 | tee source-build.log
+      - name: Preserve build logs even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source-build-diagnostics
+          path: |
+            source-build.log
+            ${{ runner.temp }}/proton-source-work/logs/
+            ${{ runner.temp }}/proton-source-work/metadata/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Candidate artifacts, not a published release
+        if: success() && inputs.operation == 'build'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source-built-proton-candidate
+          path: ${{ runner.temp }}/proton-source-work/output/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+  anonymous-base-probe:
+    if: inputs.operation == 'preflight'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check exact Steam manifest anonymously (no depot payload)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir probe
+          curl --fail --location --proto '=https' --proto-redir '=https' --max-time 90 \
+            -o probe/tool.zip https://github.com/SteamRE/DepotDownloader/releases/download/DepotDownloader_3.4.0/DepotDownloader-linux-x64.zip
+          echo 'a999dec66b4850fc961bd50366696d23c2d0fad7b18790e6a5647b2f19097a53  probe/tool.zip' | sha256sum -c -
+          unzip -q probe/tool.zip -d probe/tool
+          chmod +x probe/tool/DepotDownloader
+          set +e
+          timeout --kill-after=5s 60s probe/tool/DepotDownloader -app 4628710 -depot 4628711 \
+            -manifest 3114679013132291065 -manifest-only -dir probe/manifest > probe/result.log 2>&1
+          status=$?
+          set -e
+          printf '\nprobe exit: %s\n' "$status" >> probe/result.log
+          cat probe/result.log
+          # Diagnostic only: a network failure is not proof of entitlement denial.
+          # Full payload download is deliberately not attempted here.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: anonymous-base-diagnostic
+          path: |
+            probe/result.log
+            probe/manifest/
+          if-no-files-found: warn
+          retention-days: 14

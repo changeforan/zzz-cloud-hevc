@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "proton_repository": "https://github.com/ValveSoftware/Proton.git",
+  "proton_tag": "proton-11.0-2",
+  "proton_commit": "db9e6ffbf24a95b104fb699dd62532c70a2f9a51",
+  "wine_base_commit": "dc26e61847081a1b5cb0733dc30feba6ee575482",
+  "vulkan_xml_version": "1.4.339",
+  "sdk_image": "registry.gitlab.steamos.cloud/proton/steamrt4/sdk/x86_64@sha256:97526b794ce1a9bed5f891084462260b3a02399569f7438a3a57b5a253001db9",
+  "sdk_tag": "4.0.20260331.220802-0",
+  "source_date_epoch": 1787334450,
+  "sdk_compressed_size_gb_approx": 2.34,
+  "disk_budget_note": "Compressed SDK size is not installed size. Total sources, recursive submodules, SDK layers, build trees and output archives are unmeasured; 60 GiB is only an initial guard, not a sufficiency guarantee."
+}

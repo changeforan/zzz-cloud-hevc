@@ -21,6 +21,10 @@ install-proton-hevc.sh      build a "Proton 11.0 (HEVC)" compatibility tool
 tools/install-zzz-client.sh install the client into a normal folder, without Steam
 tools/vidprobe.c            list D3D11 decoder profiles and try to create each
 tools/nv12srv.c             minimal repro: NV12 plane shader-resource views
+tools/prepare-proton-overlay.py prepare a hashed overlay without installing it
+tools/package-proton.sh     assemble a standalone candidate archive
+packaging/                 pinned inputs and local/CI packaging instructions
+.github/workflows/         packaging tests and manual candidate packaging
 ```
 
 Live branches with the same commits applied:
@@ -73,6 +77,17 @@ the patch should probably also mask `GEN_MIPMAP` out of the derived planar caps,
 which this version does not.
 
 ## Building for Proton
+
+For a **standalone patched archive and GitHub Actions packaging**, see
+[packaging/README.md](packaging/README.md). That path accepts a pinned stock
+distribution and a prepared Wine overlay, leaves the installed tool untouched,
+and produces candidate artifacts with checksums and provenance. It does not
+require a full Proton rebuild or publish releases automatically.
+
+The **packaged release** includes HEVC launch defaults: select it in Steam and
+leave launch options empty. It defaults to wined3d, Vulkan rendering and builtin
+DXGI. The explicit launch options below remain necessary for the older local
+tool installed by `install-proton-hevc.sh`. See the packaging guide for overrides.
 
 `install-proton-hevc.sh` builds a **separate** compatibility tool and leaves stock
 Proton untouched. Read its header comment before running — it documents the build.

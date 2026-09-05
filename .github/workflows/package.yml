@@ -1,0 +1,79 @@
+name: Package experimental Proton HEVC
+
+# This assembles existing binaries; it does not build Wine or fetch Steam depots.
+# No release is published. Download and hardware-test the artifact first.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Unique experimental version, e.g. 11.0-2-hevc.1'
+        required: true
+        type: string
+      base_url:
+        description: 'HTTPS URL: stock Proton 11.0-2 tar.gz, one root directory'
+        required: true
+        type: string
+      base_sha256:
+        description: 'SHA-256 of the stock Proton archive'
+        required: true
+        type: string
+      overlay_url:
+        description: 'HTTPS URL: prepared Wine overlay tar.gz, one root directory'
+        required: true
+        type: string
+      overlay_sha256:
+        description: 'SHA-256 of the overlay archive'
+        required: true
+        type: string
+      source_url:
+        description: 'HTTPS URL: complete corresponding-source tar.gz for all shipped components'
+        required: true
+        type: string
+      source_sha256:
+        description: 'SHA-256 of the corresponding-source archive'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proton-package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Test packaging tools
+        run: python3 -m unittest discover -s tests -v
+      - name: Fetch verified inputs
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          BASE_SHA: ${{ inputs.base_sha256 }}
+          OVERLAY_URL: ${{ inputs.overlay_url }}
+          OVERLAY_SHA: ${{ inputs.overlay_sha256 }}
+          SOURCE_URL: ${{ inputs.source_url }}
+          SOURCE_SHA: ${{ inputs.source_sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir inputs
+          python3 tools/fetch-package-input.py --url "$BASE_URL" --sha256 "$BASE_SHA" --output inputs/base.tar.gz --extract-to inputs/base
+          python3 tools/fetch-package-input.py --url "$OVERLAY_URL" --sha256 "$OVERLAY_SHA" --output inputs/overlay.tar.gz --extract-to inputs/overlay
+          python3 tools/fetch-package-input.py --url "$SOURCE_URL" --sha256 "$SOURCE_SHA" --output inputs/source.tar.gz
+      - name: Assemble standalone archive
+        env:
+          PACKAGE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          bash tools/package-proton.sh --base inputs/base --overlay inputs/overlay --source-bundle inputs/source.tar.gz --provenance inputs/overlay/build-provenance.json --version "$PACKAGE_VERSION" --output dist
+      - name: Upload candidate and sources (not a release)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: proton-hevc-candidate
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "proton_version": "1787334450 proton-11.0-2-x86_64",
+  "proton_tag": "proton-11.0-2",
+  "wine_base_commit": "dc26e61847081a1b5cb0733dc30feba6ee575482",
+  "vulkan_xml_version": "1.4.339",
+  "source_date_epoch": 1787334450
+}
