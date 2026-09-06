@@ -10,8 +10,21 @@ Written to get **Zenless Zone Zero Cloud** running under Proton on a Steam Deck
 and d3d11 work.
 
 Status: HEVC decode is bit-exact against software decode on a six-stream matrix,
-H.264 is unregressed, and the target application runs with working audio and
-gamepad input under a patched Proton 11.0.
+H.264 is unregressed, and both clients below are user-confirmed working under
+our patched Proton 11.0.
+
+## Tested clients
+
+| Client | Version tested | Confirmation |
+|---|---|---|
+| Zenless Zone Zero Cloud (ZZZ Cloud) | 3.1.0.5865 | User-confirmed playable, including audio, controller input and Steam Gaming Mode. The video-probe failure and live HEVC decode path were also traced. |
+| Genshin Impact Cloud (云·原神 / Genshin Cloud) | 7.0.0.5949 | User-confirmed working with our Proton build; the user reported that the other Proton versions they tried did not work. |
+
+Genshin Cloud's confirmation is an end-to-end user report, not a separate
+codec trace or root-cause diagnosis. We have not isolated which patch makes the
+difference for that client, nor separately verified its audio, controller or
+Gaming Mode behavior. These results do not establish compatibility with every
+client version, GPU or driver. Neither client's binaries were patched.
 
 ## What's here
 

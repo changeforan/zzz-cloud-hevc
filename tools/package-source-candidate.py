@@ -173,7 +173,7 @@ def package(args):
         p.replace_file(stage, "compatibilitytool.vdf", text=(
             '"compatibilitytools" { "compat_tools" {\n'
             f'"{identifier}" {{ "display_name" "{identifier} (LOCAL TEST ONLY)"\n'
-            '"install_path" "." "from_oslist" "linux" "to_oslist" "windows" } } }\n'))
+            '"install_path" "." "from_oslist" "windows" "to_oslist" "linux" } } }\n'))
         if "steampipe_fixups.json" in entries:
             p.replace_file(stage, "steampipe_fixups.json", text=json.dumps(p.clean_fixups(redist), sort_keys=True) + "\n")
         for name in ("COPYING.LIB", "LICENSE.md"):

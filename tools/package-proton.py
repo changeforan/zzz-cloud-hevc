@@ -373,8 +373,8 @@ def package(args):
         replace_file(stage, "compatibilitytool.vdf", text=(
             '"compatibilitytools"\n{\n  "compat_tools"\n  {\n'
             f'    "{identifier}"\n    {{\n      "display_name" "{identifier}"\n'
-            '      "install_path" "."\n      "from_oslist" "linux"\n'
-            '      "to_oslist" "windows"\n    }\n  }\n}\n'))
+            '      "install_path" "."\n      "from_oslist" "windows"\n'
+            '      "to_oslist" "linux"\n    }\n  }\n}\n'))
         for name in ("COPYING.LIB", "LICENSE.md"):
             replace_file(stage, "hevc-metadata/" + name, source=REPO / name)
         if local_candidate:

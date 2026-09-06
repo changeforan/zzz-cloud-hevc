@@ -96,6 +96,8 @@ class SourceCandidateTests(unittest.TestCase):
             self.assertIn(b"proton-hevc-source-test-1", read("version"))
             self.assertEqual(read("toolmanifest.vdf").decode(), self.toolmanifest)
             self.assertIn(b"LOCAL TEST ONLY", read("compatibilitytool.vdf"))
+            self.assertIn(b'"from_oslist" "windows"', read("compatibilitytool.vdf"))
+            self.assertIn(b'"to_oslist" "linux"', read("compatibilitytool.vdf"))
             self.assertFalse(any("default_pfx" in name for name in tar.getnames()))
             self.assertFalse(any("steampipe_fixups" in name for name in tar.getnames()))
             for name, digest in manifest["files"].items():

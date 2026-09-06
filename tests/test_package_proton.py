@@ -125,8 +125,8 @@ class PackageTests(unittest.TestCase):
                 self.assertEqual(tar.getmember(prefix + name).linkname, target)
             self.assertEqual(tar.extractfile(prefix + "hevc-metadata/build-manifest.json").read(), original["build-manifest.json"])
             compat = tar.extractfile(prefix + "compatibilitytool.vdf").read()
-            self.assertIn(b'"from_oslist" "linux"', compat)
-            self.assertIn(b'"to_oslist" "windows"', compat)
+            self.assertIn(b'"from_oslist" "windows"', compat)
+            self.assertIn(b'"to_oslist" "linux"', compat)
             self.assertIn(b'4183110', tar.extractfile(prefix + "toolmanifest.vdf").read())
         for line in original["SHA256SUMS"].decode().splitlines():
             digest, name = line.split("  ")
